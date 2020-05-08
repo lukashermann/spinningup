@@ -2,11 +2,16 @@ import numpy as np
 import torch
 from torch.optim import Adam
 import gym
+import os
 import time
 import spinup.algos.pytorch.ppo.core as core
+from spinup.algos.pytorch.ppo.cnn_policy import ImgStateActorCriticDictBox
 from spinup.utils.logx import EpochLogger
 from spinup.utils.mpi_pytorch import setup_pytorch_for_mpi, sync_params, mpi_avg_grads
 from spinup.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
+from spinup.env_wrappers import *
+from tensorboardX import SummaryWriter
+from gym_grasping.envs.grasping_env import GraspingEnv
 
 
 class PPOBuffer:
@@ -84,11 +89,10 @@ class PPOBuffer:
         return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in data.items()}
 
 
-
-def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0, 
-        steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
-        vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, lam=0.97, max_ep_len=1000,
-        target_kl=0.01, logger_kwargs=dict(), save_freq=10):
+def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=0,
+        steps_per_epoch=4096, epochs=2441, gamma=0.99, clip_ratio=0.1, pi_lr=2.5e-4,
+        vf_lr=2.5e-3, train_pi_iters=16, train_v_iters=16, lam=0.95, max_ep_len=1000,
+        target_kl=0.01, logger_kwargs=dict(), save_freq=300, eval_interval=20, num_eval_episodes=32, device='cuda'):
     """
     Proximal Policy Optimization (by clipping), 
 
@@ -199,13 +203,18 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
 
+    tb_writer = SummaryWriter(log_dir=logger_kwargs['output_dir'])
+
     # Random seed
     seed += 10000 * proc_id()
     torch.manual_seed(seed)
     np.random.seed(seed)
 
+    local_steps_per_epoch = int(steps_per_epoch / num_procs())
+
     # Instantiate environment
     env = env_fn()
+    env = PyTorchWrapper(DictToBoxWrapper(DictTransposeImage(CurriculumWrapper(env, epochs, local_steps_per_epoch, tb_writer=tb_writer))), device)
     obs_dim = env.observation_space.shape
     act_dim = env.action_space.shape
 
@@ -216,11 +225,11 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     sync_params(ac)
 
     # Count variables
-    var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.v])
-    logger.log('\nNumber of parameters: \t pi: %d, \t v: %d\n'%var_counts)
+    var_counts = tuple(core.count_vars(module) for module in [ac.cnn, ac.pi_, ac.v_])
+    logger.log('\nNumber of parameters: \t cnn: %d, \t pi: %d, \t v: %d\n'%var_counts)
 
     # Set up experience buffer
-    local_steps_per_epoch = int(steps_per_epoch / num_procs())
+
     buf = PPOBuffer(obs_dim, act_dim, local_steps_per_epoch, gamma, lam)
 
     # Set up function for computing PPO policy loss
@@ -248,8 +257,8 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         return ((ac.v(obs) - ret)**2).mean()
 
     # Set up optimizers for policy and value function
-    pi_optimizer = Adam(ac.pi.parameters(), lr=pi_lr)
-    vf_optimizer = Adam(ac.v.parameters(), lr=vf_lr)
+    pi_optimizer = Adam(list(ac.cnn.parameters()) + list(ac.pi_.parameters()), lr=pi_lr)
+    vf_optimizer = Adam(list(ac.cnn.parameters()) + list(ac.v_.parameters()), lr=vf_lr)
 
     # Set up model saving
     logger.setup_pytorch_saver(ac)
@@ -270,7 +279,8 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                 logger.log('Early stopping at step %d due to reaching max kl.'%i)
                 break
             loss_pi.backward()
-            mpi_avg_grads(ac.pi)    # average grads across MPI processes
+            mpi_avg_grads(ac.cnn)    # average grads across MPI processes
+            mpi_avg_grads(ac.pi_)    # average grads across MPI processes
             pi_optimizer.step()
 
         logger.store(StopIter=i)
@@ -280,7 +290,8 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
             vf_optimizer.zero_grad()
             loss_v = compute_loss_v(data)
             loss_v.backward()
-            mpi_avg_grads(ac.v)    # average grads across MPI processes
+            mpi_avg_grads(ac.cnn)    # average grads across MPI processes
+            mpi_avg_grads(ac.v_)    # average grads across MPI processes
             vf_optimizer.step()
 
         # Log changes from update
@@ -290,6 +301,25 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                      DeltaLossPi=(loss_pi.item() - pi_l_old),
                      DeltaLossV=(loss_v.item() - v_l_old))
 
+    def eval_policy():
+        eval_env = PyTorchWrapper(DictToBoxWrapper(DictTransposeImage(env_fn())), device)
+        eval_episode_returns = []
+        ob = eval_env.reset()
+        eval_ep_ret = 0
+        while len(eval_episode_returns) < num_eval_episodes:
+            action = ac.act(ob, deterministic=True)
+            ob, rew, done, _ = eval_env.step(action)
+            eval_ep_ret += rew.cpu().numpy()
+            if done:
+                eval_episode_returns.append(eval_ep_ret)
+                ob = eval_env.reset()
+                eval_ep_ret = 0
+        eval_env.close()
+        tb_writer.add_scalar("eval_eprewmean_updates", np.mean(eval_episode_returns), epoch)
+        tb_writer.add_scalar("eval_eprewmean_steps", np.mean(eval_episode_returns), (epoch+1)*steps_per_epoch)
+        tb_writer.add_scalar("eval_success_rate",
+                             np.mean(np.array(eval_episode_returns) > 0).astype(np.float),
+                             (epoch+1)*steps_per_epoch)
     # Prepare for interaction with environment
     start_time = time.time()
     o, ep_ret, ep_len = env.reset(), 0, 0
@@ -298,11 +328,9 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     for epoch in range(epochs):
         for t in range(local_steps_per_epoch):
             a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
-
             next_o, r, d, _ = env.step(a)
             ep_ret += r
             ep_len += 1
-
             # save and log
             buf.store(o, a, r, v, logp)
             logger.store(VVals=v)
@@ -328,7 +356,6 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
                 o, ep_ret, ep_len = env.reset(), 0, 0
 
-
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs-1):
             logger.save_state({'env': env}, None)
@@ -336,6 +363,18 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         # Perform PPO update!
         update()
 
+        if epoch % eval_interval == 0 or (epoch == epochs-1):
+            if epoch == epochs - 1:
+                num_eval_episodes = 100
+            eval_policy()
+
+        # Tensorboard log
+        try:
+            tb_writer.add_scalar("eprewmean_updates", logger.get_stats('EpRet')[0], epoch)
+            tb_writer.add_scalar("eprewmean_steps", logger.get_stats('EpRet')[0], (epoch+1)*steps_per_epoch)
+        except IndexError:
+            pass
+        tb_writer.flush()
         # Log info about epoch
         logger.log_tabular('Epoch', epoch)
         logger.log_tabular('EpRet', with_min_and_max=True)
@@ -353,10 +392,11 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         logger.log_tabular('Time', time.time()-start_time)
         logger.dump_tabular()
 
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--env', type=str, default='MountainCar-v0')
     parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
