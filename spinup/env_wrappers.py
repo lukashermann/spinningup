@@ -3,32 +3,32 @@ import numpy as np
 from gym.spaces.box import Box
 from collections import deque
 import torch
-from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
-
-
-class SubProcWrapper(gym.Wrapper):
-    def __init__(self, env_fn):
-        env = SubprocVecEnv([env_fn])
-        env.reward_range = None
-        super(SubProcWrapper, self).__init__(env)
-
-    def step(self, action):
-        action = np.expand_dims(action, axis=0)
-        o, r, d, i = self.env.step(action)
-        o['img'] = o['img'].squeeze()
-        o['robot_state'] = o['robot_state'].squeeze()
-        o['task_state'] = o['task_state'].squeeze()
-        r = r[0]
-        d = d[0]
-        i = i[0]
-        return o, r, d, i
-
-    def reset(self):
-        o = self.env.reset()
-        o['img'] = o['img'].squeeze()
-        o['robot_state'] = o['robot_state'].squeeze()
-        o['task_state'] = o['task_state'].squeeze()
-        return o
+# from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
+#
+#
+# class SubProcWrapper(gym.Wrapper):
+#     def __init__(self, env_fn):
+#         env = SubprocVecEnv([env_fn])
+#         env.reward_range = None
+#         super(SubProcWrapper, self).__init__(env)
+#
+#     def step(self, action):
+#         action = np.expand_dims(action, axis=0)
+#         o, r, d, i = self.env.step(action)
+#         o['img'] = o['img'].squeeze()
+#         o['robot_state'] = o['robot_state'].squeeze()
+#         o['task_state'] = o['task_state'].squeeze()
+#         r = r[0]
+#         d = d[0]
+#         i = i[0]
+#         return o, r, d, i
+#
+#     def reset(self):
+#         o = self.env.reset()
+#         o['img'] = o['img'].squeeze()
+#         o['robot_state'] = o['robot_state'].squeeze()
+#         o['task_state'] = o['task_state'].squeeze()
+#         return o
 
 
 class PyTorchWrapper(gym.Wrapper):
