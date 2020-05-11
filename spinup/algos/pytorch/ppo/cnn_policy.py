@@ -37,11 +37,11 @@ def nature_cnn(init_, input_shape, output_size, activation):
 def split_obs(obs):
     if len(obs.shape) == 4:
         img = obs[:, :3, :, :]
-        robot_state_shape = int(obs[0, 3, 0, 0].numpy())
+        robot_state_shape = int(obs[0, 3, 0, 0].cpu().numpy())
         robot_state = obs[:, 3, 0, 1: robot_state_shape + 1]
     elif len(obs.shape) == 3:
         img = obs[:3, :, :]
-        robot_state_shape = int(obs[3, 0, 0].numpy())
+        robot_state_shape = int(obs[3, 0, 0].cpu().numpy())
         robot_state = obs[3, 0, 1: robot_state_shape + 1]
     else:
         raise ValueError

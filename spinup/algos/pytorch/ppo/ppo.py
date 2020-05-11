@@ -21,7 +21,8 @@ class PPOBuffer:
     for calculating the advantages of state-action pairs.
     """
 
-    def __init__(self, obs_dim, act_dim, size, gamma=0.99, lam=0.95):
+    def __init__(self, obs_dim, act_dim, size, gamma=0.99, lam=0.95, device='cuda'):
+        self.device = device
         self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
         self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
         self.adv_buf = np.zeros(size, dtype=np.float32)
@@ -37,9 +38,9 @@ class PPOBuffer:
         Append one timestep of agent-environment interaction to the buffer.
         """
         assert self.ptr < self.max_size     # buffer has to have room so you can store
-        self.obs_buf[self.ptr] = obs
+        self.obs_buf[self.ptr] = obs.cpu()
         self.act_buf[self.ptr] = act
-        self.rew_buf[self.ptr] = rew
+        self.rew_buf[self.ptr] = rew.cpu()
         self.val_buf[self.ptr] = val
         self.logp_buf[self.ptr] = logp
         self.ptr += 1
@@ -86,7 +87,7 @@ class PPOBuffer:
         self.adv_buf = (self.adv_buf - adv_mean) / adv_std
         data = dict(obs=self.obs_buf, act=self.act_buf, ret=self.ret_buf,
                     adv=self.adv_buf, logp=self.logp_buf)
-        return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in data.items()}
+        return {k: torch.as_tensor(v, dtype=torch.float32, device=self.device) for k,v in data.items()}
 
 
 def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=0,
@@ -220,6 +221,7 @@ def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=
 
     # Create actor-critic module
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
+    ac.to(device)
 
     # Sync params across processes
     sync_params(ac)
@@ -230,7 +232,7 @@ def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=
 
     # Set up experience buffer
 
-    buf = PPOBuffer(obs_dim, act_dim, local_steps_per_epoch, gamma, lam)
+    buf = PPOBuffer(obs_dim, act_dim, local_steps_per_epoch, gamma, lam, device)
 
     # Set up function for computing PPO policy loss
     def compute_loss_pi(data):
@@ -327,7 +329,7 @@ def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
         for t in range(local_steps_per_epoch):
-            a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
+            a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32, device=device))
             next_o, r, d, _ = env.step(a)
             ep_ret += r
             ep_len += 1
@@ -347,7 +349,7 @@ def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=
                     print('Warning: trajectory cut off by epoch at %d steps.'%ep_len, flush=True)
                 # if trajectory didn't reach terminal state, bootstrap value target
                 if timeout or epoch_ended:
-                    _, v, _ = ac.step(torch.as_tensor(o, dtype=torch.float32))
+                    _, v, _ = ac.step(torch.as_tensor(o, dtype=torch.float32, device=device))
                 else:
                     v = 0
                 buf.finish_path(v)
