@@ -104,6 +104,7 @@ class CurriculumWrapper(gym.Wrapper):
         self.tb_writer = tb_writer
         self.num_regular_resets = 0
         self.num_resets = 0
+        self.current_episode_return = 0
 
     def update_difficulties(self):
         if len(self.curr_success) > 1:
@@ -142,13 +143,14 @@ class CurriculumWrapper(gym.Wrapper):
             self.num_regular_resets = 0
             self.num_resets = 0
         obs, rew, done, info = self.env.step(action)
-        if 'episode' in info.keys():
+        self.current_episode_return += rew
+        if done:
             if 'reset_info' in info.keys() and info['reset_info'] == 'curriculum':
-                self.curr_episode_rewards.append(info['episode']['r'])
+                self.curr_episode_rewards.append(self.current_episode_return)
                 self.curr_success.append(float(info['task_success']))
                 self.num_resets += 1
             elif 'reset_info' in info.keys() and info['reset_info'] == 'regular':
-                self.reg_episode_rewards.append(info['episode']['r'])
+                self.reg_episode_rewards.append(self.current_episode_return)
                 self.reg_success.append(float(info['task_success']))
                 self.num_resets += 1
                 self.num_regular_resets += 1
@@ -157,6 +159,7 @@ class CurriculumWrapper(gym.Wrapper):
     def reset(self):
         data = self.create_data_dict()
         obs = self.env.reset(data)
+        self.current_episode_return = 0
         return obs
 
     def write_tb_log(self):
