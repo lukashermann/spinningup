@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torch.optim import Adam
+from torch.optim.lr_scheduler import LambdaLR
 import gym
 import os
 import time
@@ -93,7 +94,8 @@ class PPOBuffer:
 def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=0,
         steps_per_epoch=4096, epochs=2441, gamma=0.99, clip_ratio=0.1, pi_lr=2.5e-4,
         vf_lr=2.5e-3, train_pi_iters=16, train_v_iters=16, lam=0.95, max_ep_len=1000,
-        target_kl=0.01, logger_kwargs=dict(), save_freq=300, eval_interval=20, num_eval_episodes=32, device='cuda'):
+        target_kl=0.01, logger_kwargs=dict(), save_freq=300, eval_interval=20, num_eval_episodes=32,
+        device='cuda', linear_lr_decay=True, linear_clip_decay=True):
     """
     Proximal Policy Optimization (by clipping), 
 
@@ -211,6 +213,7 @@ def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=
     torch.manual_seed(seed)
     np.random.seed(seed)
 
+    initial_clip_ratio = clip_ratio
     local_steps_per_epoch = int(steps_per_epoch / num_procs())
 
     # Instantiate environment
@@ -241,6 +244,8 @@ def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=
         # Policy loss
         pi, logp = ac.pi(obs, act)
         ratio = torch.exp(logp - logp_old)
+        if linear_clip_decay:
+            clip_ratio = initial_clip_ratio * (1 - epoch / epochs)
         clip_adv = torch.clamp(ratio, 1-clip_ratio, 1+clip_ratio) * adv
         loss_pi = -(torch.min(ratio * adv, clip_adv)).mean()
 
@@ -261,6 +266,9 @@ def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=
     # Set up optimizers for policy and value function
     pi_optimizer = Adam(list(ac.cnn.parameters()) + list(ac.pi_.parameters()), lr=pi_lr)
     vf_optimizer = Adam(list(ac.cnn.parameters()) + list(ac.v_.parameters()), lr=vf_lr)
+    lr_decay = lambda e: 1 - e / epochs
+    pi_lr_scheduler = LambdaLR(pi_optimizer, lr_decay)
+    vf_lr_scheduler = LambdaLR(vf_optimizer, lr_decay)
 
     # Set up model saving
     logger.setup_pytorch_saver(ac)
@@ -295,7 +303,9 @@ def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=
             mpi_avg_grads(ac.cnn)    # average grads across MPI processes
             mpi_avg_grads(ac.v_)    # average grads across MPI processes
             vf_optimizer.step()
-
+        if linear_lr_decay:
+            pi_lr_scheduler.step()
+            vf_lr_scheduler.step()
         # Log changes from update
         kl, ent, cf = pi_info['kl'], pi_info_old['ent'], pi_info['cf']
         logger.store(LossPi=pi_l_old, LossV=v_l_old,
