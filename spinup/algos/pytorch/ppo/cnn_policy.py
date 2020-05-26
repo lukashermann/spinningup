@@ -59,12 +59,18 @@ class CNNSharedNet(nn.Module):
 
 class ImgStateGaussianActor(nn.Module):
 
-    def __init__(self, cnn_output_shape, state_input_shape, act_dim, state_fc_size, cat_fc_size, activation, init_=lambda _: _):
+    def __init__(self, cnn_output_shape, state_input_shape, act_dim, state_fc_size, cat_fc_size, activation, init_=lambda _: _, init2_=lambda _: _):
         super().__init__()
         self.actor_state = mlp([state_input_shape]+ list(state_fc_size), activation, activation, init_)
-        log_std = -0.5 * np.ones(act_dim, dtype=np.float32)
+        # log_std = -0.5 * np.ones(act_dim, dtype=np.float32)
+        log_std = np.zeros(act_dim, dtype=np.float32)
         self.log_std = torch.nn.Parameter(torch.as_tensor(log_std))
-        self.mu_net = mlp([cnn_output_shape + state_fc_size[-1]] + [cat_fc_size] + [act_dim], activation, init_=init_)
+        # self.mu_net = mlp([cnn_output_shape + state_fc_size[-1]] + [cat_fc_size] + [act_dim], activation, init_=init_)
+
+        self.mu_net = nn.Sequential(init_(nn.Linear(cnn_output_shape + state_fc_size[-1], cat_fc_size)),
+                                    activation(),
+                                    init2_(nn.Linear(cat_fc_size, act_dim)))
+
 
     def _distribution(self, obs):
         mu = self.mu_net(obs)
@@ -89,11 +95,14 @@ class ImgStateGaussianActor(nn.Module):
 
 class ImgStateCritic(nn.Module):
 
-    def __init__(self, cnn_output_shape, state_input_shape, state_fc_size, cat_fc_size, activation, init_=lambda _: _):
+    def __init__(self, cnn_output_shape, state_input_shape, state_fc_size, cat_fc_size, activation, init_=lambda _: _, init2_=lambda _: _):
         super().__init__()
         self.critic_state = mlp([state_input_shape] + list(state_fc_size), activation, activation,
                                 init_)
-        self.v_net = mlp([cnn_output_shape + state_fc_size[-1]] + [cat_fc_size] + [1], activation, init_=init_)
+        # self.v_net = mlp([cnn_output_shape + state_fc_size[-1]] + [cat_fc_size] + [1], activation, init_=init_)
+        self.v_net = nn.Sequential(init_(nn.Linear(cnn_output_shape + state_fc_size[-1], cat_fc_size)),
+                                    activation(),
+                                    init2_(nn.Linear(cat_fc_size, 1)))
 
     def forward(self, cnn_output, state_input):
         h1 = self.critic_state(state_input)
@@ -119,14 +128,17 @@ class ImgStateActorCriticDictBox(nn.Module):
 
         init_ = lambda m: init(m, nn.init.orthogonal_, lambda x: nn.init.constant_(x, 0),
                                np.sqrt(2))
+        init2_ = lambda m: init(m,
+                               nn.init.orthogonal_,
+                               lambda x: nn.init.constant_(x, 0))
         # policy builder depends on action space
         if isinstance(action_space, Box):
-            self.pi_ = ImgStateGaussianActor(cnn_fc_size, state_input_shape, action_space.shape[0], state_fc_size, cat_fc_size, fc_activation, init_)
+            self.pi_ = ImgStateGaussianActor(cnn_fc_size, state_input_shape, action_space.shape[0], state_fc_size, cat_fc_size, fc_activation, init_, init2_)
         elif isinstance(action_space, Discrete):
             raise NotImplementedError
             # self.pi = MLPCategoricalActor(obs_dim, action_space.n, hidden_sizes, activation)
         # build value function
-        self.v_ = ImgStateCritic(cnn_fc_size, state_input_shape, state_fc_size, cat_fc_size, fc_activation, init_)
+        self.v_ = ImgStateCritic(cnn_fc_size, state_input_shape, state_fc_size, cat_fc_size, fc_activation, init_, init2_)
 
     def pi(self, obs, act=None):
         img, robot_state = split_obs(obs)
