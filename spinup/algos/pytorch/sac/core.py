@@ -12,11 +12,11 @@ def combined_shape(length, shape=None):
         return (length,)
     return (length, shape) if np.isscalar(shape) else (length, *shape)
 
-def mlp(sizes, activation, output_activation=nn.Identity):
+def mlp(sizes, activation, output_activation=nn.Identity, init_=lambda _: _):
     layers = []
     for j in range(len(sizes)-1):
         act = activation if j < len(sizes)-2 else output_activation
-        layers += [nn.Linear(sizes[j], sizes[j+1]), act()]
+        layers += [init_(nn.Linear(sizes[j], sizes[j+1])), act()]
     return nn.Sequential(*layers)
 
 def count_vars(module):

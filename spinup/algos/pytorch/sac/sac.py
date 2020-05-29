@@ -6,15 +6,19 @@ from torch.optim import Adam
 import gym
 import time
 import spinup.algos.pytorch.sac.core as core
+from spinup.algos.pytorch.sac.cnn_policy import CNNActorCritic
 from spinup.utils.logx import EpochLogger
-
+from spinup.env_wrappers import *
+from tensorboardX import SummaryWriter
+from gym_grasping.envs.grasping_env import GraspingEnv
 
 class ReplayBuffer:
     """
     A simple FIFO experience replay buffer for SAC agents.
     """
 
-    def __init__(self, obs_dim, act_dim, size):
+    def __init__(self, obs_dim, act_dim, size, device='cuda'):
+        self.device = device
         self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
         self.obs2_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
         self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
@@ -23,10 +27,10 @@ class ReplayBuffer:
         self.ptr, self.size, self.max_size = 0, 0, size
 
     def store(self, obs, act, rew, next_obs, done):
-        self.obs_buf[self.ptr] = obs
-        self.obs2_buf[self.ptr] = next_obs
+        self.obs_buf[self.ptr] = obs.cpu()
+        self.obs2_buf[self.ptr] = next_obs.cpu()
         self.act_buf[self.ptr] = act
-        self.rew_buf[self.ptr] = rew
+        self.rew_buf[self.ptr] = rew.cpu()
         self.done_buf[self.ptr] = done
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
@@ -38,15 +42,15 @@ class ReplayBuffer:
                      act=self.act_buf[idxs],
                      rew=self.rew_buf[idxs],
                      done=self.done_buf[idxs])
-        return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in batch.items()}
+        return {k: torch.as_tensor(v, dtype=torch.float32, device=self.device) for k,v in batch.items()}
 
 
 
-def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0, 
-        steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99, 
+def sac(env_fn, actor_critic=CNNActorCritic, ac_kwargs=dict(), seed=0,
+        steps_per_epoch=4000, epochs=100, replay_size=int(1e4), gamma=0.99,
         polyak=0.995, lr=1e-3, alpha=0.2, batch_size=100, start_steps=10000, 
         update_after=1000, update_every=50, num_test_episodes=10, max_ep_len=1000, 
-        logger_kwargs=dict(), save_freq=1):
+        logger_kwargs=dict(), save_freq=1, device='cuda'):
     """
     Soft Actor-Critic (SAC)
 
@@ -147,10 +151,16 @@ def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
 
+    tb_writer = SummaryWriter(log_dir=logger_kwargs['output_dir'])
+
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     env, test_env = env_fn(), env_fn()
+    env = PyTorchWrapper(DictToBoxWrapper(DictTransposeImage(
+        CurriculumWrapper(env, epochs, steps_per_epoch, tb_writer=tb_writer))), device)
+    test_env = PyTorchWrapper(DictToBoxWrapper(DictTransposeImage(env_fn())), device)
+
     obs_dim = env.observation_space.shape
     act_dim = env.action_space.shape[0]
 
@@ -160,6 +170,8 @@ def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     # Create actor-critic module and target networks
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
     ac_targ = deepcopy(ac)
+    ac.to(device)
+    ac_targ.to(device)
 
     # Freeze target networks with respect to optimizers (only update via polyak averaging)
     for p in ac_targ.parameters():
@@ -169,7 +181,7 @@ def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     q_params = itertools.chain(ac.q1.parameters(), ac.q2.parameters())
 
     # Experience buffer
-    replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size)
+    replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size, device=device)
 
     # Count variables (protip: try to get a feel for how different size networks behave!)
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.q1, ac.q2])
@@ -199,8 +211,8 @@ def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         loss_q = loss_q1 + loss_q2
 
         # Useful info for logging
-        q_info = dict(Q1Vals=q1.detach().numpy(),
-                      Q2Vals=q2.detach().numpy())
+        q_info = dict(Q1Vals=q1.detach().cpu().numpy(),
+                      Q2Vals=q2.detach().cpu().numpy())
 
         return loss_q, q_info
 
@@ -216,7 +228,7 @@ def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         loss_pi = (alpha * logp_pi - q_pi).mean()
 
         # Useful info for logging
-        pi_info = dict(LogPi=logp_pi.detach().numpy())
+        pi_info = dict(LogPi=logp_pi.detach().cpu().numpy())
 
         return loss_pi, pi_info
 
@@ -264,10 +276,11 @@ def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                 p_targ.data.add_((1 - polyak) * p.data)
 
     def get_action(o, deterministic=False):
-        return ac.act(torch.as_tensor(o, dtype=torch.float32), 
+        return ac.act(torch.as_tensor(o, dtype=torch.float32, device=device),
                       deterministic)
 
     def test_agent():
+        eval_episode_returns = []
         for j in range(num_test_episodes):
             o, d, ep_ret, ep_len = test_env.reset(), False, 0, 0
             while not(d or (ep_len == max_ep_len)):
@@ -275,7 +288,14 @@ def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                 o, r, d, _ = test_env.step(get_action(o, True))
                 ep_ret += r
                 ep_len += 1
+            eval_episode_returns.append(ep_ret)
             logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
+        tb_writer.add_scalar("eval_eprewmean_updates", np.mean(eval_episode_returns), epoch)
+        tb_writer.add_scalar("eval_eprewmean_steps", np.mean(eval_episode_returns),
+                             (epoch + 1) * steps_per_epoch)
+        tb_writer.add_scalar("eval_success_rate",
+                             np.mean(np.array(eval_episode_returns) > 0).astype(np.float),
+                             (epoch + 1) * steps_per_epoch)
 
     # Prepare for interaction with environment
     total_steps = steps_per_epoch * epochs
@@ -331,6 +351,15 @@ def sac(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
 
             # Test the performance of the deterministic version of the agent.
             test_agent()
+
+            # Tensorboard log
+            try:
+                tb_writer.add_scalar("eprewmean_updates", logger.get_stats('EpRet')[0], epoch)
+                tb_writer.add_scalar("eprewmean_steps", logger.get_stats('EpRet')[0],
+                                     (epoch + 1) * steps_per_epoch)
+            except IndexError:
+                pass
+            tb_writer.flush()
 
             # Log info about epoch
             logger.log_tabular('Epoch', epoch)

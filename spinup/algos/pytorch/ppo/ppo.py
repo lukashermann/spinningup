@@ -246,6 +246,7 @@ def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=
         ratio = torch.exp(logp - logp_old)
         if linear_clip_decay:
             clip_ratio = initial_clip_ratio * (1 - epoch / epochs)
+            print(clip_ratio)
         clip_adv = torch.clamp(ratio, 1-clip_ratio, 1+clip_ratio) * adv
         loss_pi = -(torch.min(ratio * adv, clip_adv)).mean()
 
@@ -335,7 +336,7 @@ def ppo(env_fn, actor_critic=ImgStateActorCriticDictBox, ac_kwargs=dict(), seed=
     # Prepare for interaction with environment
     start_time = time.time()
     o, ep_ret, ep_len = env.reset(), 0, 0
-
+    actions = []
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
         for t in range(local_steps_per_epoch):
