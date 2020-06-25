@@ -12,6 +12,17 @@ class Flatten(nn.Module):
     def forward(self, x):
         return x.view(x.size(0), -1)
 
+def weight_init(m):
+    """Custom weight init for Conv2D and Linear layers."""
+    if isinstance(m, nn.Linear):
+        nn.init.orthogonal_(m.weight.data)
+        if hasattr(m.bias, 'data'):
+            m.bias.data.fill_(0.0)
+    elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        gain = nn.init.calculate_gain('relu')
+        nn.init.orthogonal_(m.weight.data, gain)
+        if hasattr(m.bias, 'data'):
+            m.bias.data.fill_(0.0)
 
 def init(module, weight_init, bias_init, gain=1):
     weight_init(module.weight.data, gain=gain)
@@ -133,7 +144,7 @@ class CNNActorCritic(nn.Module):
 
     def __init__(self, observation_space, action_space, state_input_shape=4,
                  cnn_fc_size=512, state_fc_size=(64, 64),
-                 cat_fc_size=128, cnn_activation=nn.ReLU, fc_activation=nn.Tanh, share_cnn=False):
+                 cat_fc_size=128, cnn_activation=nn.ReLU, fc_activation=nn.Tanh, share_cnn=True, init_=lambda _: _):
         super().__init__()
 
         cnn_input_shape = observation_space.shape[0] - 1
@@ -141,10 +152,10 @@ class CNNActorCritic(nn.Module):
         act_limit = action_space.high[0]
 
         # shared network
-        init_ = lambda m: init(m,
-                               nn.init.orthogonal_,
-                               lambda x: nn.init.constant_(x, 0),
-                               nn.init.calculate_gain('relu'))
+        # init_ = lambda m: init(m,
+        #                        nn.init.orthogonal_,
+        #                        lambda x: nn.init.constant_(x, 0),
+        #                        nn.init.calculate_gain('relu'))
         pi_cnn = CNNSharedNet(cnn_input_shape, cnn_fc_size, cnn_activation, init_)
         if share_cnn:
             q_cnn = pi_cnn
@@ -154,6 +165,8 @@ class CNNActorCritic(nn.Module):
         self.pi = SquashedGaussianCNNActor(pi_cnn, cnn_fc_size, state_input_shape, act_dim, state_fc_size, cat_fc_size, fc_activation, act_limit, init_)
         self.q1 = CNNQFunction(q_cnn, cnn_fc_size, state_input_shape, state_fc_size, cat_fc_size, act_dim, fc_activation)
         self.q2 = CNNQFunction(q_cnn, cnn_fc_size, state_input_shape, state_fc_size, cat_fc_size, act_dim, fc_activation)
+
+        self.apply(weight_init)
 
     def act(self, obs, deterministic=False):
         with torch.no_grad():

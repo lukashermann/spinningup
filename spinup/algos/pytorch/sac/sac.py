@@ -12,6 +12,23 @@ from spinup.env_wrappers import *
 from tensorboardX import SummaryWriter
 from gym_grasping.envs.grasping_env import GraspingEnv
 
+
+def timeit(method):
+    def timed(*args, **kw):
+        ts = time.time()
+        result = method(*args, **kw)
+        te = time.time()
+
+        if 'log_time' in kw:
+            name = kw.get('log_name', method.__name__.upper())
+            kw['log_time'][name] = int((te - ts) * 1000)
+        else:
+            print('%r  %2.2f ms' % \
+                  (method.__name__, (te - ts) * 1000))
+        return result
+
+    return timed
+
 class ReplayBuffer:
     """
     A simple FIFO experience replay buffer for SAC agents.
@@ -26,6 +43,7 @@ class ReplayBuffer:
         self.done_buf = np.zeros(size, dtype=np.float32)
         self.ptr, self.size, self.max_size = 0, 0, size
 
+    @timeit
     def store(self, obs, act, rew, next_obs, done):
         self.obs_buf[self.ptr] = obs.cpu()
         self.obs2_buf[self.ptr] = next_obs.cpu()
@@ -35,6 +53,7 @@ class ReplayBuffer:
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
 
+    @timeit
     def sample_batch(self, batch_size=32):
         idxs = np.random.randint(0, self.size, size=batch_size)
         batch = dict(obs=self.obs_buf[idxs],
@@ -48,8 +67,8 @@ class ReplayBuffer:
 
 def sac(env_fn, actor_critic=CNNActorCritic, ac_kwargs=dict(), seed=0,
         steps_per_epoch=4000, epochs=100, replay_size=int(1e4), gamma=0.99,
-        polyak=0.995, lr=1e-3, alpha=0.2, batch_size=100, start_steps=10000, 
-        update_after=1000, update_every=50, num_test_episodes=10, max_ep_len=1000, 
+        polyak=0.995, lr=1e-3, alpha=0.2, batch_size=512, start_steps=10000,
+        update_after=100, update_every=1, num_test_episodes=10, max_ep_len=1000,
         logger_kwargs=dict(), save_freq=1, device='cuda'):
     """
     Soft Actor-Critic (SAC)
@@ -188,6 +207,7 @@ def sac(env_fn, actor_critic=CNNActorCritic, ac_kwargs=dict(), seed=0,
     logger.log('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n'%var_counts)
 
     # Set up function for computing SAC Q-losses
+    @timeit
     def compute_loss_q(data):
         o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
 
@@ -217,6 +237,7 @@ def sac(env_fn, actor_critic=CNNActorCritic, ac_kwargs=dict(), seed=0,
         return loss_q, q_info
 
     # Set up function for computing SAC pi loss
+    @timeit
     def compute_loss_pi(data):
         o = data['obs']
         pi, logp_pi = ac.pi(o)
@@ -238,7 +259,7 @@ def sac(env_fn, actor_critic=CNNActorCritic, ac_kwargs=dict(), seed=0,
 
     # Set up model saving
     logger.setup_pytorch_saver(ac)
-
+    @timeit
     def update(data):
         # First run one gradient descent step for Q1 and Q2
         q_optimizer.zero_grad()
@@ -278,7 +299,7 @@ def sac(env_fn, actor_critic=CNNActorCritic, ac_kwargs=dict(), seed=0,
     def get_action(o, deterministic=False):
         return ac.act(torch.as_tensor(o, dtype=torch.float32, device=device),
                       deterministic)
-
+    @timeit
     def test_agent():
         eval_episode_returns = []
         for j in range(num_test_episodes):
